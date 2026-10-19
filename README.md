@@ -1,8 +1,9 @@
 # FinSight
 
 OpenDART 실제 재무제표를 조회하고, Python으로 수치를 계산·비교하는 금융 분석 프로젝트입니다.
-Day 1은 데이터 조회·정규화·비교 계층과 CLI, Mock 테스트까지 구현합니다.
-LangGraph Agent, OpenAI 호출, RAG, ChromaDB, FastAPI, Streamlit, Docker는 후속 단계입니다.
+Day 1의 데이터 조회·정규화·비교 계층 위에 Day 2 LangGraph Agent를 구현했습니다.
+자연어 질문에 따라 OpenAI가 Tool을 선택하고, Python이 재무 수치를 계산하고 보고서를 작성합니다.
+RAG, ChromaDB, FastAPI, Streamlit, Docker는 후속 단계입니다.
 
 ## 구조
 
@@ -20,10 +21,18 @@ LangGraph Agent, OpenAI 호출, RAG, ChromaDB, FastAPI, Streamlit, Docker는 후
 │   │   └── corporations.py     # corpCode.xml 기업명·종목코드 인덱스
 │   ├── financials.py           # 순수 함수: 항목 추출과 Decimal 계산
 │   ├── services.py             # 조회 흐름과 두 기업 비교
-│   ├── cli.py                  # JSON CLI
+│   ├── serialization.py        # Decimal·근거 모델의 공통 JSON 변환
+│   ├── agent/
+│   │   ├── graph.py            # LangGraph 선택·실행·보고서 노드
+│   │   ├── tools.py            # 입력 검증과 Day 1 서비스 어댑터
+│   │   ├── model.py            # OpenAI SDK 및 주입 가능한 모델 인터페이스
+│   │   ├── reporting.py        # Tool 근거만 사용하는 Python 보고서
+│   │   └── audit.py            # 키를 제거한 JSONL 호출 로그
+│   ├── cli.py                  # Day 1 명령 + agent 명령
 │   └── __main__.py
 ├── tests/                      # 실제 키·네트워크를 사용하지 않는 테스트
-└── docs/decisions.md            # 설계 선택, 실제 오류, 검증 기록
+├── scripts/verify_live.py       # 명시적으로 실행하는 복수 연도 실제 API 검증
+└── docs/                       # decisions.md와 agent.md
 ```
 
 기존 [FinAgent](https://github.com/JNMYNG/FinAgent)의 `agent.py`와 `tools.py`에서
@@ -56,7 +65,37 @@ OPENDART_API_KEY=발급받은_40자리_OpenDART_인증키
 기존 설정과의 호환성을 위해 `DART_API_KEY`도 지원합니다. 두 이름이 모두 있으면
 `OPENDART_API_KEY`를 우선합니다. 같은 이름의 셸 환경변수는 `.env`보다 우선합니다.
 기존 `.env`를 덮어쓰지 않으며, `.env`와 `.env.*`는 Git에서 제외하고 `.env.example`만 추적합니다.
-`OPENAI_API_KEY`는 Day 1에 필요하지 않습니다.
+`OPENAI_API_KEY`는 Day 1 명령에 필요하지 않습니다. Day 2 Agent에는 아래 설정도 필요합니다.
+
+```dotenv
+OPENAI_API_KEY=발급받은_OpenAI_인증키
+OPENAI_MODEL=gpt-4.1-mini
+```
+
+기본 모델은 실제 연동으로 검증한 `gpt-4.1-mini`이며, 다른 Tool Calling 지원 모델은
+`OPENAI_MODEL`로 지정할 수 있습니다. 다른 모델과의 호환성은 별도 검증이 필요합니다.
+
+## 자연어 Agent (Day 2)
+
+```bash
+.venv/bin/python -m finsight agent '삼성전자 2024년 연결 영업이익률을 계산해 줘.'
+.venv/bin/python -m finsight agent '삼성전자와 SK하이닉스의 2023년과 2024년 연결 재무정보를 비교해 줘.'
+```
+
+`model → tools → model`을 반복한 뒤 `report` 노드가 Tool 결과로 답변을 작성합니다.
+기업 조회·재무제표 조회·영업이익률 계산·기업 비교 Tool과 추가 입력 요청 Tool을 제공합니다.
+자유 형식 LLM 응답의 수치는 최종 보고서에 사용하지 않습니다.
+
+결과 JSON에는 `status`, `answer`, `tool_calls`, `stop_reason`, `run_id`, `error`가 있습니다.
+각 호출의 입력·실행 결과·순서를 JSON과 기본 `logs/agent.jsonl`에서 확인할 수 있습니다.
+`--log-file`, `--max-tool-calls`(기본 8), `--max-model-turns`(기본 10)를 지정할 수 있습니다.
+로그 파일은 Git에서 제외합니다. OpenAI 요청에는 API 사용료가 발생합니다.
+
+검증된 결과는 `completed`, 누락·경고·일부 실패는 `partial`, 실행 불가는 `error`,
+추가 조건 요청은 `needs_input`, 반복 제한 도달은 `limit_reached`입니다.
+`completed`/`needs_input`은 종료 코드 0, `partial`/`error`/`limit_reached`는 1입니다.
+사업연도 없이 질문하면 연도를 임의 선택하지 않고 추가 입력을 요청합니다.
+자세한 구조와 한계는 [Agent 가이드](docs/agent.md)를 확인하세요.
 
 ## 실행
 
@@ -130,14 +169,23 @@ OPENDART_API_KEY=발급받은_40자리_OpenDART_인증키
 
 ```bash
 .venv/bin/pytest --cov=finsight --cov-report=term-missing
-.venv/bin/ruff check src tests
-.venv/bin/ruff format --check src tests
+.venv/bin/ruff check src tests scripts
+.venv/bin/ruff format --check src tests scripts
 ```
 
 `httpx.MockTransport`로 ZIP/XML과 JSON 응답, API 오류, 통신 실패를 검증합니다.
 테스트의 재무 수치는 합성 데이터이며 실제 기업 실적을 의미하지 않습니다.
 모든 테스트는 임시 디렉터리에서 실행되어 실제 `.env`를 읽지 않습니다.
 Mock 검증과 실제 API 조회 결과는 [설계·검증 기록](docs/decisions.md)에 구분해서 기록합니다.
+
+실제 API 검증은 pytest와 분리하여 명시적으로 실행합니다. 이 명령은 OpenDART 키만 사용합니다.
+
+```bash
+.venv/bin/python scripts/verify_live.py --years 2022 2023 2024
+```
+
+2022·2023·2024년 두 기업의 연결 사업보고서 6건과, 실제 OpenAI Agent의 복수 연도 비교 및
+기업 조회 → 재무제표 조회 → 계산 Tool 선택을 확인했습니다. 실제 API 검증은 해당 범위에 한정됩니다.
 
 ## 공식 문서
 

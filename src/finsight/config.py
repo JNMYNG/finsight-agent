@@ -20,3 +20,20 @@ class Settings:
         if len(key) != 40 or not key.isascii() or not key.isalnum():
             raise ConfigurationError("OPENDART_API_KEY에 발급받은 40자리 인증키를 설정하세요.")
         return cls(opendart_api_key=key)
+
+
+@dataclass(frozen=True)
+class AgentSettings:
+    openai_api_key: str = field(repr=False)
+    model: str = "gpt-4.1-mini"
+
+    @classmethod
+    def from_env(cls, env_file: str | Path = ".env") -> "AgentSettings":
+        load_dotenv(env_file, override=False)
+        key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not key:
+            raise ConfigurationError("Agent 실행에는 OPENAI_API_KEY가 필요합니다.")
+        model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini").strip()
+        if not model:
+            raise ConfigurationError("OPENAI_MODEL은 빈 문자열일 수 없습니다.")
+        return cls(openai_api_key=key, model=model)

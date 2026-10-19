@@ -224,4 +224,5 @@ __marimo__/
 # Local OpenDART downloads and analysis output
 data/cache/
 reports/
+logs/
 .DS_Store

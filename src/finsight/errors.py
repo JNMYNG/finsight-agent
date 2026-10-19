@@ -34,3 +34,7 @@ class CompanyNotFoundError(FinSightError):
 
 class AmbiguousCompanyError(FinSightError):
     pass
+
+
+class AgentModelError(FinSightError):
+    """Sanitized model API/protocol failure."""

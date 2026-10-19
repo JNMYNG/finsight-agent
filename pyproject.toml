@@ -12,6 +12,9 @@ dependencies = [
     "httpx>=0.28,<0.29",
     "python-dotenv>=1.0,<2",
     "defusedxml>=0.7.1,<0.8",
+    "langgraph>=1.0,<2",
+    "openai>=2,<3",
+    "pydantic>=2.10,<3",
 ]
 
 [project.optional-dependencies]
