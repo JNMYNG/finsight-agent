@@ -481,3 +481,134 @@ SK하이닉스 search_disclosures 순서로 호출했다. 두 검색 모두 관�
 거리/주제/문장 판정은 제한된 규칙이며 전체 검색 품질 벤치마크나 인과 분석은 아니다.
 자유 형식 LLM 합성 설명, 전체 보고서의 완전한 시각적 복원, 구세대 벡터 자동 정리,
 다중 프로세스 색인 경쟁의 통합 검증, Streamlit UI, Docker는 이번 범위에 포함하지 않았다.
+
+## 27. Day 3 — 기존 Agent 위의 얇은 로컬 UI
+
+Day 1~Day 2-2의 데이터·계산·Agent·검색 코드는 변경하지 않았다. 작업 시작 시 Git 변경은 없었고,
+기존 267개 테스트가 통과했다. FastAPI나 별도 백엔드 서버 없이 Streamlit에서 기존 LangGraph를
+직접 실행한다. Sites 스킬의 로컬 미리보기 경로만 적용하고 호스팅·저장소 동기화는 사용하지 않았다.
+
+- `streamlit_app.py`: 실행 진입점.
+- `web/service.py`: 화면 조건 검증, 요청별 기존 클라이언트 조립/종료, 선택 범위 검사, 안전한 진행 이벤트.
+- `web/presentation.py`: 실제 Tool 결과에서 표·차트·문서 근거를 추출하는 투영 계층.
+- `web/app.py`: 조건 입력·상태·카드·비교표·차트·검색 근거·실행 내역.
+- `.streamlit/config.toml`: 금융 대시보드 테마, 루프백 바인딩, 사용 통계 전송 비활성화.
+
+Streamlit 1.66.0 공식 AppTest·line_chart·status 문서와 설치된 API를 확인했다.
+테스트한 최소 버전을 의존성에 명시하고 `uv.lock`을 갱신했다. pandas/Altair를 직접 호출하지 않고
+Streamlit의 표·차트를 사용한다. 계산을 복제하지 않으며 Tool 반환 Decimal 문자열을 정확히 표시한다.
+차트만 부동소수점으로 변환하고, 결측을 0으로 채우거나 다른 통화를 KRW 축에 섞지 않는다.
+
+## 28. 화면 조건과 결과의 신뢰 경계
+
+UI는 두 기업의 연간 사업보고서, 명시적 CFS/OFS, 최대 3개 연도를 받는다. 분반기는 기존 CLI에는
+남아 있지만 UI에는 지원하는 것처럼 노출하지 않는다. RAG는 2024년 II/IV만 검색한다.
+복수 연도 재무 질문에서도 문서 근거는 2024년 범위이며 해당 제한을 화면에 표시한다.
+
+자연어 질문과 화면 선택이 명시적으로 충돌하면 실행 전에 수정을 안내한다. 화면 조건을 Agent
+질문에 전달하되 프롬프트만 신뢰하지 않는다. `ScopedModel`이 기존 모델의 Tool 선택 결과를 검사하여
+선택 밖 기업·연도·보고서·기준 또는 2024년 밖 문서 검색을 실제 API/Tool 실행 전에 차단한다.
+이는 UI 전용 어댑터이며 기존 CLI·Agent 기본 동작을 바꾸지 않는다.
+
+결과도 기업명·고유번호·연도·기준·보고서·공시 링크를 확인한 뒤 표시한다. 모델의 자유 응답 수치를
+사용하지 않는다. 선택한 연도/기업의 반환이 누락되거나 RAG 관련 문장이 없으면 정상 완료를 강등한다.
+근거 문장은 데이터로 표시하고, 기존 RAG의 모델 입력 격리를 유지한다. 인과 기여를 추정하지 않는다.
+
+진행 화면과 실행 표는 도구명·순서·성공 여부·소요 시간만 노출한다. 기존 마스킹 AuditLog를 재사용하며
+상세 로그는 무시되는 `logs/web-agent.jsonl`에 기록한다. SDK 예외·헤더·키·원시 인자를 화면에 출력하지
+않는다. 예상 밖 예외도 고정된 오류 문구로 처리한다. 민감한 traceback을 보여주는 `st.exception`은 쓰지 않는다.
+
+요청마다 클라이언트를 만들고 ExitStack으로 종료한다. 전역 클라이언트 캐시는 도입하지 않았다.
+세션에는 조회 결과만 저장하므로 차트 변경 시 유료 API를 다시 호출하지 않는다. 조건이 바뀌면 이전
+실행임을 명시하고, 새 실행이 실패하면 과거 성공 결과가 새 결과로 남지 않도록 제거한다.
+UI 호출은 최대 Tool 12회·모델 16턴으로 제한한다.
+
+## 29. Day 3에서 실제 발견한 오류와 수정
+
+- pytest fixture를 `request`로 선언해 수집이 실패했다. pytest 예약어이므로 `analysis_request`로 변경했다.
+- 처음 차트 모듈을 로드할 때 AppTest 기본 3초 제한을 초과했다. Mock UI 테스트 제한을 30초로 늘렸고,
+  실제 API 검증은 별도 240초 제한을 둔다. 시간 초과를 성공으로 간주하지 않았다.
+- 링크 객체의 `str()`에는 URL이 없어 테스트가 실패했다. 실제 렌더링된 `link.proto.url`을 검사하도록 수정했다.
+- 실제 검증 스크립트가 예전 `arrow_vega_lite_chart` 이름으로 차트를 찾아 실패했다. 설치된 Streamlit
+  1.66의 실제 프로토콜 이름 `vega_lite_chart`로 수정하고 Mock 테스트에도 차트 존재 검사를 추가했다.
+- 재파싱 원문 메타데이터와 검색 메타데이터의 전체 동등 비교가 실패했다. 검색 결과에는 색인 단계가
+  추가한 `generation`이 있다. 원문 필드는 전부 원문과 비교하고, 활성 generation은 기존 검색 서비스의
+  검증을 유지한다. 본문·해시·기업·연도·접수번호·출처·위치의 검사를 완화한 것은 아니다.
+- 샌드박스에서 로컬 서버 소켓 바인딩과 Chrome 제어 포트 접속이 거부됐다. 승인된 로컬 실행으로
+  재검증했다. 애플리케이션의 API 오류와 환경 권한 오류를 구분했다.
+- 최초 Chrome 캡처는 가상 시간이 먼저 진행되어 로딩 skeleton만 담았다. 실제 DOM의 FinSight·
+  분석 버튼 표시를 기다린 뒤 다시 촬영하고 초기 화면을 확인했다.
+- 실제 결과 화면에서 긴 원 단위 금액이 카드 너비를 넘어 생략됐다. 단위를 재계산하지 않고 카드
+  글자 크기를 반응형으로 조정했다. 원본 금액 문자열과 상세 비교표는 유지한다.
+- 개발 중 Streamlit hot reload가 dataclass 타입을 교체하면 동일한 조건인데도 이전 결과 안내가
+  표시됐다. 타입 동등성 대신 조건 필드의 값으로 비교하고 세션 객체 타입이 달라지는 회귀 검사를 추가했다.
+
+위의 외부 API 검증 스크립트 초기 실패들은 Agent 실행 성공과 구분하여 처리했고, 수정 후 최종 검증을
+다시 실행했다. 실제 서비스의 실패 응답을 인위적으로 유발하지 않았으며 API 실패·누락 처리는 Mock이다.
+
+## 30. Day 3 자동화 검증
+
+```bash
+uv sync --extra dev --locked
+.venv/bin/pytest --cov=finsight --cov-report=term-missing
+.venv/bin/ruff check src tests scripts streamlit_app.py
+.venv/bin/ruff format --check src tests scripts streamlit_app.py
+git diff --check
+```
+
+최종 검증 환경은 Python 3.11.16, Streamlit 1.66.0이다. 전체 **314 passed**, 분기 포함 coverage
+표시값 **95%**, Ruff lint와 format 검사가 통과했다. 기존 267개 + UI 관련 47개다.
+기존 재무·Agent·RAG 파일의 코드를 변경하지 않았으며 전체 테스트로 회귀를 확인했다.
+
+새 테스트는 입력 조건, 범위 밖 호출의 API 이전 차단, CFS/OFS와 복수 연도 전달, Python 반환값 표시,
+결측과 근거 부족, 문서 기업/연도/접수번호/링크 혼입 차단, 초기 화면, 카드·표·차트·근거·호출 순서,
+한 번 실행 후 차트 변경 시 재조회 방지, 조건 변경 시 이전 결과 안내, 오류/키 비노출, 리소스 종료를
+검증한다. pytest는 합성 자료·ScriptedModel·MockTransport를 사용하며 실제 키·외부 API를 사용하지 않는다.
+
+변경 파일과 로컬 JSONL 로그 15개에서 설정된 API 키 2개의 원문 포함 여부를 검사했고 일치 0개였다.
+`.env`, 원문, Chroma DB, 로그, Streamlit secrets의 Git ignore 적용 및 미추적 상태도 확인했다.
+Git commit/push는 실행하지 않았다.
+
+## 31. Day 3 실제 API 및 UI 검증
+
+```bash
+.venv/bin/python scripts/verify_web_live.py
+.venv/bin/python scripts/verify_web_live.py --years 2024 --basis OFS --no-rag
+.venv/bin/python -m streamlit run streamlit_app.py --server.port 8501
+curl --fail --silent --show-error http://127.0.0.1:8501/_stcore/health
+curl --fail --silent --show-error -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8501/
+```
+
+자동화 pytest와 별도로, 실제 OpenDART·OpenAI를 사용하는 Streamlit AppTest를 실행했다.
+UI 반환 재무값을 독립적인 기존 Day 1 서비스 조회와 대조하고, RAG 발췌·본문·해시·모든 원문 메타데이터를
+저장된 실제 ZIP 재파싱 결과와 비교했다. 화면의 링크 URL·XML 위치와 차트 표시도 검사했다.
+
+- CFS: run_id `e5a0fbe4d9d048f3bce188b3e9979941`, status=completed, 종료 코드 0.
+  compare_companies 3회 → search_disclosures 2회. 두 기업 2022·2023·2024년 6개 재무 요약,
+  두 기업의 2024년 검색 문장 6개, financial_source_verified=true,
+  rag_original_provenance_verified=true. 차트 지표 변경 후 실행 ID도 유지됐다.
+- OFS: run_id `3ef1abb256994fe78296855c51323434`, status=completed, 종료 코드 0.
+  2024년 compare_companies 1회, 두 기업 재무값을 독립 OFS 조회와 대조했다. RAG는 요청하지 않았다.
+- 로컬 HTTP: 초기 페이지 200, health `ok`.
+- 별도로 설치된 Chrome의 독립 임시 프로필에서 초기 화면을 렌더링하고 실제 분석 버튼을 클릭했다.
+  2024년 CFS의 정상 완료와 10.88%/35.45% 표시를 확인했다.
+  브라우저 실행 run_id `7a5175bc94454287a1a008a49ee915ed`, 실제 Tool 3회, status=completed.
+  UI 스크린샷·Chrome 임시 프로필은 `/private/tmp`에만 두고 저장소에 추가하지 않았다.
+
+| 사업연도 | 삼성전자 CFS 영업이익률 | SK하이닉스 CFS 영업이익률 |
+| --- | ---: | ---: |
+| 2022 | 14.35% | 15.26% |
+| 2023 | 2.54% | -23.59% |
+| 2024 | 10.88% | 35.45% |
+
+2024년 OFS 영업이익률은 삼성전자 5.91%, SK하이닉스 38.27%였다. CFS 값과 혼합하지 않았다.
+
+검색 출처 예시: 삼성전자의 HBM·DDR5 판매 대응 관련 문장은 접수번호 `20250311001085`,
+II.7 XML 6401행이며 [DART 원문](https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250311001085)으로
+연결된다. SK하이닉스의 AI 고성능 메모리 수요·수익성 중심 운영 관련 문장은 `20250319000665`,
+IV XML 116825행이며 [DART 원문](https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250319000665)으로
+연결된다. 이는 관련 서술의 출처 대조이며 이익률 차이의 인과 기여를 입증한 것은 아니다.
+
+실제 검증 범위는 위 두 기업·연도·선택한 질문과 검색어다. 모든 자연어 표현·전체 제공 연도·다른
+모델·다양한 창 크기/모바일·다중 사용자 동시 실행을 검증한 것은 아니다. 다른 연도/기업 RAG,
+보고서 전체 복원, 자유 형식 원인 합성, 분반기 UI, 인증·배포·Docker는 이번 범위에 추가하지 않았다.

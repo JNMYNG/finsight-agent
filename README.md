@@ -4,7 +4,8 @@ OpenDART 실제 재무제표를 조회하고, Python으로 수치를 계산·비
 Day 1의 데이터 조회·정규화·비교 계층 위에 Day 2 LangGraph Agent를 구현했습니다.
 자연어 질문에 따라 OpenAI가 Tool을 선택하고, Python이 재무 수치를 계산하고 보고서를 작성합니다.
 Day 2-2에서는 실제 2024년 사업보고서의 OpenAI Embeddings·ChromaDB 검색을 연결했습니다.
-FastAPI, Streamlit UI, Docker는 구현하지 않았습니다.
+Day 3에서는 기존 Agent를 사용하는 로컬 Streamlit 대시보드를 추가했습니다.
+FastAPI, Docker, 클라우드 배포는 구현하지 않았습니다.
 
 ## 구조
 
@@ -13,6 +14,8 @@ FastAPI, Streamlit UI, Docker는 구현하지 않았습니다.
 ├── pyproject.toml / uv.lock     # 패키지 설정과 고정된 의존성
 ├── .python-version             # Python 3.11
 ├── .env.example
+├── streamlit_app.py            # 로컬 웹 앱 진입점
+├── .streamlit/config.toml      # 화면 테마·로컬 바인딩·통계 수집 비활성화
 ├── src/finsight/
 │   ├── config.py               # 명시적인 환경변수 로딩
 │   ├── models.py               # 기업·재무항목·근거·비교 결과 모델
@@ -30,11 +33,12 @@ FastAPI, Streamlit UI, Docker는 구현하지 않았습니다.
 │   │   ├── reporting.py        # Tool 근거만 사용하는 Python 보고서
 │   │   └── audit.py            # 키를 제거한 JSONL 호출 로그
 │   ├── rag/                   # 원문 모델·파서·임베딩·Chroma 색인·검색 서비스
+│   ├── web/                   # 조건 검증·Agent 런타임·표/차트/근거 표시
 │   ├── cli.py                  # Day 1 명령 + agent 명령
 │   └── __main__.py
 ├── tests/                      # 실제 키·네트워크를 사용하지 않는 테스트
 ├── scripts/verify_live.py       # 명시적으로 실행하는 복수 연도 실제 API 검증
-└── docs/                       # decisions.md, agent.md, rag.md
+└── docs/                       # decisions.md, agent.md, rag.md, web.md
 ```
 
 기존 [FinAgent](https://github.com/JNMYNG/FinAgent)의 `agent.py`와 `tools.py`에서
@@ -76,6 +80,36 @@ OPENAI_MODEL=gpt-4.1-mini
 
 기본 모델은 실제 연동으로 검증한 `gpt-4.1-mini`이며, 다른 Tool Calling 지원 모델은
 `OPENAI_MODEL`로 지정할 수 있습니다. 다른 모델과의 호환성은 별도 검증이 필요합니다.
+
+## 로컬 웹 앱 (Day 3)
+
+프로젝트 루트에서 실행하세요. 위의 두 API 키가 필요합니다.
+
+```bash
+uv sync --extra dev --locked
+# RAG를 처음 사용하는 경우에만 실제 원문 수집·색인 (API 비용 발생)
+.venv/bin/python -m finsight rag-index
+.venv/bin/streamlit run streamlit_app.py
+```
+
+브라우저에서 `http://127.0.0.1:8501`을 엽니다. 기업·사업연도(최대 3개)·연결/별도를 선택하고
+자연어 질문을 입력한 뒤 **분석 실행**을 누르세요. 재무 카드·비교표·연도별 차트, 공시 발췌·위치·링크,
+실제 Tool 호출 순서를 표시합니다. 최초 색인은 UI에서 자동 실행하지 않습니다.
+
+UI는 삼성전자·SK하이닉스의 연간 재무 조회를 지원합니다. RAG는 두 기업의 **2024년만** 지원합니다.
+다른 연도의 재무만 조회하려면 RAG를 해제하세요. 수치가 없으면 0으로 대체하지 않습니다.
+연도별 차트는 실제 조회된 값만 사용하며, 선택한 연도 중 빠진 결과는 일부 성공으로 표시합니다.
+API 실패·누락·근거 부족을 정상 완료로 표시하지 않습니다. 질문의 명시 조건과 화면 선택이 다르면
+수정을 안내하며 Agent가 선택 범위를 벗어나는 요청을 실행하지 못하도록 검사합니다.
+
+실제 외부 API를 사용하는 UI 검증은 pytest와 분리합니다 (API 비용 발생).
+
+```bash
+.venv/bin/python scripts/verify_web_live.py
+.venv/bin/python scripts/verify_web_live.py --years 2024 --basis OFS --no-rag
+```
+
+실행·지원 범위·오류 안내와 검증 한계는 [웹 앱 가이드](docs/web.md)를 확인하세요.
 
 ## 자연어 Agent (Day 2)
 
@@ -203,8 +237,8 @@ DB 경로는 `--db-path`로 지정할 수 있습니다. 기존 `agent` 명령은
 
 ```bash
 .venv/bin/pytest --cov=finsight --cov-report=term-missing
-.venv/bin/ruff check src tests scripts
-.venv/bin/ruff format --check src tests scripts
+.venv/bin/ruff check src tests scripts streamlit_app.py
+.venv/bin/ruff format --check src tests scripts streamlit_app.py
 ```
 
 `httpx.MockTransport`로 ZIP/XML과 JSON 응답, API 오류, 통신 실패를 검증합니다.
@@ -225,6 +259,8 @@ Mock 검증과 실제 API 조회 결과는 [설계·검증 기록](docs/decision
 
 - [기업 고유번호: corpCode.xml](https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019018)
 - [단일회사 주요계정: fnlttSinglAcnt](https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS003&apiId=2019016)
+- [Streamlit AppTest](https://docs.streamlit.io/develop/api-reference/app-testing/st.testing.v1.apptest)
+- [Streamlit 차트](https://docs.streamlit.io/develop/api-reference/charts/st.line_chart)
 
 주요계정 API에는 `fs_div` 요청 인자가 없으며 응답의 구분으로 선택합니다.
 공시 정정에 따라 같은 사업연도의 조회 값도 바뀔 수 있으므로 조회시각과 접수번호를 함께 확인하세요.

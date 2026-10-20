@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.10,<3",
     "chromadb>=1.0,<2",
     "beautifulsoup4>=4.13,<5",
+    "streamlit>=1.66,<2",
 ]
 
 [project.optional-dependencies]
