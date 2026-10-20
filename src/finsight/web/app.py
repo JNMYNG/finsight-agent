@@ -9,9 +9,12 @@ from finsight.errors import ConfigurationError, FinSightError
 from finsight.web.presentation import (
     METRICS,
     chart_rows,
+    chart_spec,
     comparison_rows,
-    filing_url,
+    financial_sources,
+    format_amount,
     format_number,
+    margin_gap_lines,
     project,
 )
 from finsight.web.service import BASIS_LABELS, COMPANIES, AnalysisRequest, run_analysis
@@ -49,7 +52,10 @@ def render_result(request, result):
     )
     with financial_tab:
         st.subheader("기업별 주요 지표")
-        st.caption("금액은 원문 통화 단위 그대로, 영업이익률은 기존 Python 계산값입니다.")
+        st.caption(
+            "금액은 조·억·만 원 단위로 소수 둘째 자리까지 반올림한 표시값입니다. "
+            "원본 금액은 상세보기에서 확인하세요. 영업이익률과 차이는 기존 Python 계산값입니다."
+        )
         latest = max(request.years)
         for summary in dashboard.summaries:
             if summary["business_year"] != latest:
@@ -58,17 +64,59 @@ def render_result(request, result):
             columns = st.columns(4)
             for column, (key, label) in zip(columns, METRICS.items(), strict=False):
                 metric = summary.get(key, {})
+                original = format_amount(metric.get("value"), metric.get("currency"), compact=False)
                 column.metric(
-                    f"{label} ({metric.get('currency') or '통화 미확인'})",
-                    format_number(metric.get("value")),
+                    label,
+                    format_amount(metric.get("value"), metric.get("currency")),
+                    help=f"원본: {original}",
                 )
             columns[3].metric(
                 "영업이익률", format_number(summary.get("operating_margin_pct"), suffix="%")
             )
         rows = comparison_rows(dashboard)
         if rows:
+            gaps = margin_gap_lines(dashboard)
+            for gap in gaps:
+                st.info(gap)
+            if len(request.companies) == 2 and not gaps:
+                st.info(
+                    "비교 가능한 Python 영업이익률 차이 결과가 없어 %p 요약을 표시하지 않습니다."
+                )
+            st.markdown("**공시 출처 · 금융감독원 OpenDART**")
+            source_columns = st.columns(2)
+            for index, summary in enumerate(
+                sorted(
+                    dashboard.summaries,
+                    key=lambda item: (item["business_year"], item["company"]["corp_name"]),
+                )
+            ):
+                column = source_columns[index % 2]
+                label = (
+                    f"{summary['company']['corp_name']} · {summary['business_year']}년 · "
+                    f"{BASIS_LABELS[summary['basis']]}({summary['basis']})"
+                )
+                sources = financial_sources(summary)
+                for receipt, url in sources:
+                    column.link_button(f"{label} · 공시 {receipt}", url, width="stretch")
+                if not sources:
+                    column.caption(f"{label} · 공시 접수번호 없음")
             st.subheader("재무지표 비교표")
             st.dataframe(rows, hide_index=True, width="stretch")
+            with st.expander("원본 금액 및 조회 정보 상세보기"):
+                st.caption(
+                    "단위 축약·반올림 전의 원본 금액입니다. 원본 데이터는 변경하지 않습니다."
+                )
+                st.dataframe(
+                    comparison_rows(dashboard, compact=False), hide_index=True, width="stretch"
+                )
+                for summary in dashboard.summaries:
+                    st.text(
+                        f"{summary['company']['corp_name']} · {summary['business_year']}년 · "
+                        f"{BASIS_LABELS[summary['basis']]}({summary['basis']}) · "
+                        f"고유번호 {summary['company']['corp_code']} · 사업보고서(11011)"
+                    )
+                    st.text(f"조회 출처: {summary.get('source', '금융감독원 OpenDART')}")
+                    st.caption(f"조회시각: {summary.get('retrieved_at', '미확인')}")
             st.subheader("연도별 실적")
             if len(request.years) == 1:
                 st.info("여러 연도 추이를 보려면 사업연도를 2~3개 선택해 다시 분석하세요.")
@@ -85,27 +133,12 @@ def render_result(request, result):
             }[label]
             chart = chart_rows(dashboard, key)
             if any(row["값"] is not None for row in chart):
-                if len(request.years) > 1:
-                    st.line_chart(chart, x="사업연도", y="값", color="기업", y_label=label)
-                else:
-                    st.bar_chart(chart, x="기업", y="값", color="기업", y_label=label)
+                st.vega_lite_chart(
+                    chart, spec=chart_spec(key, multiyear=len(request.years) > 1), width="stretch"
+                )
                 st.caption("차트만 부동소수점으로 표시합니다. 누락은 0으로 대체하지 않습니다.")
             else:
                 st.warning("차트에 표시할 검증된 수치가 없습니다.")
-            with st.expander("재무 데이터 공시 출처"):
-                for summary in dashboard.summaries:
-                    st.text(
-                        f"{summary['company']['corp_name']} · {summary['business_year']}년 · "
-                        f"{summary['basis']} · 고유번호 {summary['company']['corp_code']}"
-                    )
-                    receipts = {
-                        evidence.get("receipt_no")
-                        for key in METRICS
-                        for evidence in summary.get(key, {}).get("evidence", [])
-                    }
-                    for receipt in sorted(item for item in receipts if filing_url(item)):
-                        st.link_button(f"OpenDART 공시 {receipt}", filing_url(receipt))
-                    st.caption("출처: 금융감독원 OpenDART 단일회사 주요계정 API")
         else:
             st.info("표시할 재무 조회 결과가 없습니다.")
     with evidence_tab:
@@ -154,11 +187,11 @@ def render_result(request, result):
 
 def main():
     st.set_page_config(page_title="FinSight | 공시 기반 재무분석", page_icon="◈", layout="wide")
-    # Static CSS only: keep exact KRW amounts visible without UI-side unit arithmetic.
+    # Static CSS only; user content and disclosure text never enter styles/HTML.
     st.markdown(
         "<style>[data-testid='stMetricValue'], [data-testid='stMetricValue'] > div {"
-        "font-size: clamp(0.8rem, 1.2vw, 1.1rem) !important; font-variant-numeric: tabular-nums;"
-        "}</style>",
+        "font-size: clamp(1rem, 1.5vw, 1.4rem) !important; font-variant-numeric: tabular-nums;"
+        "} [data-testid='stMainBlockContainer'] {padding-top: 2.5rem;} </style>",
         unsafe_allow_html=True,
     )
     st.markdown("FINANCIAL INTELLIGENCE / OPENDART")

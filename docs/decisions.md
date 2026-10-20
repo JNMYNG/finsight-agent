@@ -612,3 +612,52 @@ IV XML 116825행이며 [DART 원문](https://dart.fss.or.kr/dsaf001/main.do?rcpN
 실제 검증 범위는 위 두 기업·연도·선택한 질문과 검색어다. 모든 자연어 표현·전체 제공 연도·다른
 모델·다양한 창 크기/모바일·다중 사용자 동시 실행을 검증한 것은 아니다. 다른 연도/기업 RAG,
 보고서 전체 복원, 자유 형식 원인 합성, 분반기 UI, 인증·배포·Docker는 이번 범위에 추가하지 않았다.
+
+## 32. Day 3 UI 가독성 개선 — 표시 계층만 변경
+
+OpenDART·LangGraph·RAG·재무 계산·UI 실행 서비스는 변경하지 않았다. 의존성 추가도 없다.
+변경은 `web/app.py`, `web/presentation.py`, UI 테스트, 기존 실제 UI 검증 스크립트의 화면 구조 기대값,
+이 가이드와 `docs/web.md`에 한정한다. Sites 스킬은 기존 로컬 미리보기 지침만 적용했고 배포하지 않았다.
+
+- KRW 카드·기본 비교표를 조/억/만 원으로 축약하고 Decimal ROUND_HALF_UP으로 표시값만 반올림한다.
+  외화는 환산하지 않는다. 음수·0·결측을 유지하며 원본 객체를 수정하지 않는다.
+- 원 단위 원본은 카드 도움말, 별도 상세 표, 차트 툴팁에서 확인한다. 상세보기에는 기업 코드·연도·
+  CFS/OFS·보고서 유형·조회 출처·조회시각도 유지한다.
+- 이익률 차이는 기존 compare_companies의 `percentage_points`·`left_minus_right` 결과를 사용한다.
+  선택 범위·단위·좌우 비율·누락/오류 여부를 확인하고 차이의 방향을 설명한다. UI에서 비율을 빼지 않는다.
+  개별 조회만 있고 비교 Tool 결과가 없으면 임의로 차이를 계산하지 않는다.
+- 통화 열은 기업/연도 행당 하나로 줄인다. 혼합 통화는 항목별 표기를 남기고 원화처럼 표시하지 않는다.
+- Streamlit 기본 간편 차트 대신 Vega-Lite 표시 사양을 지정한다. 기업/연도 레이블 0도, 높이 240px,
+  작은 padding, 복수 연도 범례 가로 배치로 여백을 줄인다. 값은 기존 차트 입력 그대로이며 금액 축
+  레이블만 조/억/만 단위로 표시한다. Streamlit·Vega-Lite 공식 API를 확인했다.
+- 공시 버튼을 비교표 위에 펼침 없이 표시한다. RAG 문장·원문 위치·접수번호·링크는 유지한다.
+
+실제 발견한 오류: 상세 표를 추가하자 기존 AppTest가 표 개수 2개를 기대해 실패했다.
+새 화면의 3개 표를 검사하도록 바꾸되, 기존 Tool 순서 검사는 유지하고 원본 금액·단일 통화 열·%p
+요약·차트 사양 검사를 추가했다. 최초 Ruff E501 한 곳도 문자열을 분리해 수정했다.
+
+실행 명령:
+
+```bash
+.venv/bin/pytest --cov=finsight --cov-report=term-missing
+.venv/bin/ruff check src tests scripts streamlit_app.py
+.venv/bin/ruff format --check src tests scripts streamlit_app.py
+.venv/bin/python scripts/verify_web_live.py
+.venv/bin/python -m streamlit run streamlit_app.py --server.port 8501
+git diff --check
+```
+
+자동화는 **340 passed** (기존 314개 + 표시 계층 회귀 26개), coverage 표시값 **95%**.
+Ruff lint/format과 diff 검사 통과. 실제 키·네트워크 없는 합성 자료로 단위 표시·반올림·음수·0·누락·
+외화·원본 불변·혼합 통화·Tool 차이값 사용·잘못된 비교 제외·가로 레이블과 원본 상세를 검증했다.
+
+실제 API AppTest는 run_id `33153c039c664cb0beb1246eb95f72f4`, status=completed, 종료 코드 0.
+2022~2024년 두 기업의 CFS 재무값을 독립 기존 서비스 조회와 대조하고 2024년 두 기업의 RAG 발췌·
+모든 원문 메타데이터·해시·문서 위치·출처를 재파싱 원문과 대조했다. 차트 변경 시 재호출도 없었다.
+
+별도의 실제 Chrome 클릭 실행은 run_id `cd5ee55c757d4098812099e2a5e21623`, Tool 3회,
+status=completed. 삼성전자 매출 `300.87조 원`, SK하이닉스 매출 `66.19조 원`, 영업이익률
+`10.88%`/`35.45%`, "SK하이닉스가 24.57%p 높음" 표시를 확인했다. 원본 상세보기에서는
+`300,870,903,000,000 원` 등을 유지했다. 차트의 기업 이름 가로 배치, 단일 통화 열, 노출된 두 공시
+버튼, RAG 탭의 두 기업 접수번호·XML 위치를 직접 확인했다. 캡처는 임시 디렉터리에만 저장했다.
+모든 기기/브라우저·모바일 레이아웃을 검증한 것은 아니다. Git commit/push는 하지 않았다.

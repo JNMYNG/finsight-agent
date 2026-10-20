@@ -31,7 +31,7 @@ def verify(years: list[int], basis: str, rag: bool) -> dict:
     dashboard = project(result, request)
     assert dashboard.status == "completed", "ANALYSIS_INCOMPLETE"
     assert len(dashboard.summaries) == len(years) * 2, "MISSING_FINANCIALS"
-    assert len(at.metric) == 8 and len(at.dataframe) == 2, "MISSING_UI_RESULTS"
+    assert len(at.metric) == 8 and len(at.dataframe) == 3, "MISSING_UI_RESULTS"
     assert at.get("vega_lite_chart"), "MISSING_CHART"
     with DartClient(Settings.from_env().opendart_api_key) as client:
         service = FinancialService(client)

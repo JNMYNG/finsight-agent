@@ -1,5 +1,6 @@
 """Synthetic financial data and scripted routing only; no paid/external API calls."""
 
+import json
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,16 @@ from finsight.errors import AgentModelError, ConfigurationError, DartTransportEr
 from finsight.serialization import to_json_value
 from finsight.web import app
 from finsight.web import service as web_service
-from finsight.web.presentation import chart_rows, comparison_rows, format_number, project
+from finsight.web.presentation import (
+    chart_rows,
+    chart_spec,
+    comparison_rows,
+    financial_sources,
+    format_amount,
+    format_number,
+    margin_gap_lines,
+    project,
+)
 from finsight.web.service import AnalysisRequest, ProgressAudit, ScopedModel
 
 from .test_agent_graph import ScriptedModel, turn
@@ -255,9 +265,13 @@ def test_app_runs_once_displays_cards_table_sources_trace(monkeypatch, analysis_
         "10.00%",
         "20.00%",
     }
-    assert len(at.dataframe) == 2
+    assert len(at.dataframe) == 3
     assert at.get("vega_lite_chart")
-    assert at.dataframe[1].value["Tool"].tolist() == ["compare_companies", "search_disclosures"]
+    assert at.dataframe[2].value["Tool"].tolist() == ["compare_companies", "search_disclosures"]
+    assert at.dataframe[1].value["매출액"].tolist() == ["500 원", "1,000 원"]
+    assert not any(column.endswith(" 통화") for column in at.dataframe[0].value.columns)
+    assert any("SK하이닉스가 10.00%p 높습니다" in item.value for item in at.info)
+    assert any("원본 금액" in item.label for item in at.expander)
     assert any("삼성전자 · 2024년 사업보고서" in element.value for element in at.text)
     assert any("XML 50행" in element.value for element in at.caption)
     assert any("20250317000001" in link.proto.url for link in at.get("link_button"))
@@ -334,3 +348,117 @@ def test_scope_rag_only_2024_even_with_multiyear(analysis_request):
     )
     with pytest.raises(AgentModelError):
         model.select([], [])
+
+
+@pytest.mark.parametrize(
+    "value,currency,expected",
+    [
+        ("300870903000000", "KRW", "300.87조 원"),
+        ("32725961000000", "KRW", "32.73조 원"),
+        ("123456789", "KRW", "1.23억 원"),
+        ("12345678", "KRW", "1,234.57만 원"),
+        ("100500000", "KRW", "1.01억 원"),
+        ("1005000000000", "KRW", "1.01조 원"),
+        ("-7730340000000", "KRW", "-7.73조 원"),
+        ("0", "KRW", "0 원"),
+        ("9999", "KRW", "9,999 원"),
+        (None, "KRW", "데이터 없음"),
+        ("NaN", "KRW", "데이터 없음"),
+        ("123456789", "USD", "123,456,789 USD"),
+        ("123456789", None, "123,456,789 (통화 미확인)"),
+    ],
+)
+def test_display_amount_units_only(value, currency, expected):
+    assert format_amount(value, currency) == expected
+
+
+def test_original_amounts_and_sources_preserved(analysis_request, result):
+    before = to_json_value(result)
+    view = project(result, analysis_request)
+    assert comparison_rows(view, compact=False)[1]["매출액"] == "1,000 원"
+    assert financial_sources(view.summaries[0]) == [
+        ("20250317000001", "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250317000001")
+    ]
+    for summary in view.summaries:
+        for key in ("revenue", "operating_profit", "net_income"):
+            format_amount(summary[key]["value"], summary[key]["currency"])
+    assert to_json_value(result) == before
+
+
+def test_mixed_currency_table_remains_explicit(analysis_request, result):
+    calls = to_json_value(result.tool_calls)
+    calls[0]["result"]["data"]["left"]["net_income"]["currency"] = "USD"
+    view = project(replace(result, tool_calls=tuple(calls)), analysis_request)
+    row = comparison_rows(view)[1]
+    assert row["통화"] == "혼합 / 항목별 표시"
+    assert row["당기순이익"] == "80 USD" and row["매출액"] == "1,000 원"
+    assert all(not key.endswith(" 통화") for key in row)
+
+
+@pytest.mark.parametrize("difference,leader", [("-10.00", "SK하이닉스"), ("42.42", "삼성전자")])
+def test_margin_gap_uses_tool_difference_not_ui_subtraction(
+    analysis_request, result, difference, leader
+):
+    calls = to_json_value(result.tool_calls)
+    # Sentinel intentionally differs from derived ratios: presentation must not recalculate it.
+    calls[0]["result"]["data"]["operating_margin_pct"]["difference"] = difference
+    view = project(replace(result, tool_calls=tuple(calls)), analysis_request)
+    assert f"{leader}가 {difference.lstrip('-')}%p 높습니다" in margin_gap_lines(view)[0]
+    assert f"삼성전자 − SK하이닉스: {difference}%p" in margin_gap_lines(view)[0]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"difference": None},
+        {"issues": ["VALUE_MISSING"]},
+        {"unit": "%"},
+        {"left_value": None},
+        {"right_value": "999.00"},
+    ],
+)
+def test_invalid_comparison_not_used_for_gap(analysis_request, result, changes):
+    calls = to_json_value(result.tool_calls)
+    calls[0]["result"]["data"]["operating_margin_pct"].update(changes)
+    view = project(replace(result, tool_calls=tuple(calls)), analysis_request)
+    assert not margin_gap_lines(view)
+
+
+def test_individual_summaries_do_not_create_a_new_ui_calculation(analysis_request, result):
+    original = result.tool_calls[0]["result"]["data"]
+    records = tuple(
+        {"tool": "get_financials", "result": {"ok": True, "data": original[key]}}
+        for key in ("left", "right")
+    )
+    view = project(replace(result, tool_calls=records), analysis_request)
+    assert len(view.summaries) == 2 and not margin_gap_lines(view)
+
+
+@pytest.mark.parametrize("multiyear", [False, True])
+def test_chart_horizontal_labels_and_compact_layout(multiyear, analysis_request, result):
+    spec = chart_spec("operating_margin_pct", multiyear=multiyear)
+    assert spec["encoding"]["x"]["axis"]["labelAngle"] == 0
+    assert spec["height"] == 240
+    assert spec["encoding"]["color"]["legend"] == (
+        {"orient": "top", "direction": "horizontal", "title": None, "offset": 8}
+        if multiyear
+        else None
+    )
+    money_spec = chart_spec("revenue", multiyear=multiyear)
+    assert "1e12" in money_spec["encoding"]["y"]["axis"]["labelExpr"]
+    rows = chart_rows(project(result, analysis_request), "revenue")
+    assert rows[1]["값"] == 1000.0 and rows[1]["원본"] == "1,000 원"
+
+
+def test_large_ui_values_and_raw_details(monkeypatch, analysis_request, result):
+    calls = to_json_value(result.tool_calls)
+    calls[0]["result"]["data"]["left"]["revenue"]["value"] = "300870903000000"
+    changed = replace(result, tool_calls=tuple(calls))
+    monkeypatch.setattr(app, "run_analysis", lambda *args: changed)
+    at = AppTest.from_file(ENTRY, default_timeout=30).run()
+    at.button[0].click().run()
+    assert not at.exception
+    assert "300.87조 원" in {metric.value for metric in at.metric}
+    assert "300,870,903,000,000 원" in at.dataframe[1].value["매출액"].tolist()
+    spec = json.loads(at.get("vega_lite_chart")[0].proto.spec)
+    assert spec["encoding"]["x"]["axis"]["labelAngle"] == 0
