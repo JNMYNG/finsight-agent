@@ -1,10 +1,47 @@
 """Build the answer exclusively from successful Python tool results, never model prose."""
 
+import re
 from decimal import Decimal
 from typing import Any
 
 from finsight.agent.tools import ToolOutcome
 from finsight.models import Corporation, FinancialComparison, FinancialMetric, FinancialSummary
+from finsight.rag.models import DisclosureSearch
+
+
+def _disclosures(data: DisclosureSearch) -> str:
+    heading = (
+        f"사업보고서 근거: {data.company.corp_name} ({data.company.corp_code}) / "
+        f"{data.business_year}년 / 사업보고서({data.report_type})"
+    )
+    if not data.hits:
+        return (
+            heading
+            + "\n근거 부족: 조건에 맞는 관련 문단을 확보하지 못해 실적 원인을 설명할 수 없습니다. "
+            + ", ".join(data.issues)
+        )
+    lines = [
+        heading,
+        "검색된 관련 서술입니다. 두 기업 실적 차이의 인과관계나 정량 기여를 확정하지 않습니다.",
+    ]
+    for hit in data.hits:
+        # Narrative evidence is not an additional financial calculator. Preserve raw
+        # source text in tool evidence, and omit numeric claims from the rendered quote.
+        quote = re.sub(
+            r"(?<![A-Za-z0-9])[+-]?[0-9][0-9,.]*(?:\s*%)?",
+            "[원문 수치 생략]",
+            hit.excerpt or hit.text,
+        )
+        meta = hit.metadata
+        lines.extend(
+            [
+                f"원문 발췌(수치 표현 생략): {quote}",
+                f"위치: {meta['section']} / {meta['member']} XML {meta['line']}행 / "
+                f"문단 {meta['block']} / 조각 {meta['part']}",
+                f"접수번호: {meta['receipt_no']} / 출처: {meta['source']}",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _number(value: Decimal | None, unit: str = "") -> str:
@@ -81,6 +118,8 @@ def render_results(outcomes: list[ToolOutcome], stop_reason: str) -> str:
             text = _comparison(outcome.data)
         elif isinstance(outcome.data, FinancialSummary):
             text = _summary(outcome.data)
+        elif isinstance(outcome.data, DisclosureSearch):
+            text = _disclosures(outcome.data)
         else:
             fields = (outcome.data or {}).get("missing_fields", [])
             labels = {

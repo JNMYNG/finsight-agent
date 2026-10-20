@@ -3,7 +3,8 @@
 OpenDART 실제 재무제표를 조회하고, Python으로 수치를 계산·비교하는 금융 분석 프로젝트입니다.
 Day 1의 데이터 조회·정규화·비교 계층 위에 Day 2 LangGraph Agent를 구현했습니다.
 자연어 질문에 따라 OpenAI가 Tool을 선택하고, Python이 재무 수치를 계산하고 보고서를 작성합니다.
-RAG, ChromaDB, FastAPI, Streamlit, Docker는 후속 단계입니다.
+Day 2-2에서는 실제 2024년 사업보고서의 OpenAI Embeddings·ChromaDB 검색을 연결했습니다.
+FastAPI, Streamlit UI, Docker는 구현하지 않았습니다.
 
 ## 구조
 
@@ -28,11 +29,12 @@ RAG, ChromaDB, FastAPI, Streamlit, Docker는 후속 단계입니다.
 │   │   ├── model.py            # OpenAI SDK 및 주입 가능한 모델 인터페이스
 │   │   ├── reporting.py        # Tool 근거만 사용하는 Python 보고서
 │   │   └── audit.py            # 키를 제거한 JSONL 호출 로그
+│   ├── rag/                   # 원문 모델·파서·임베딩·Chroma 색인·검색 서비스
 │   ├── cli.py                  # Day 1 명령 + agent 명령
 │   └── __main__.py
 ├── tests/                      # 실제 키·네트워크를 사용하지 않는 테스트
 ├── scripts/verify_live.py       # 명시적으로 실행하는 복수 연도 실제 API 검증
-└── docs/                       # decisions.md와 agent.md
+└── docs/                       # decisions.md, agent.md, rag.md
 ```
 
 기존 [FinAgent](https://github.com/JNMYNG/FinAgent)의 `agent.py`와 `tools.py`에서
@@ -96,6 +98,38 @@ OPENAI_MODEL=gpt-4.1-mini
 `completed`/`needs_input`은 종료 코드 0, `partial`/`error`/`limit_reached`는 1입니다.
 사업연도 없이 질문하면 연도를 임의 선택하지 않고 추가 입력을 요청합니다.
 자세한 구조와 한계는 [Agent 가이드](docs/agent.md)를 확인하세요.
+
+## 사업보고서 RAG (Day 2-2)
+
+삼성전자·SK하이닉스의 2024년 사업보고서만 지원합니다. 실제 원문 ZIP을 수집하고,
+`II. 사업의 내용`, `IV. 이사의 경영진단 및 분석의견`을 색인합니다. 보고서 전체를 색인한 것은 아닙니다.
+
+```bash
+# 실제 수집·임베딩·로컬 DB 생성 (두 기업, 최초 1회)
+.venv/bin/python -m finsight rag-index
+
+# 기업·2024년·사업보고서 조건을 적용한 검색
+.venv/bin/python -m finsight rag-search 삼성전자 '메모리 HBM 수요와 수익성 개선 요인'
+.venv/bin/python -m finsight rag-search SK하이닉스 '메모리 HBM 수요와 수익성 개선 요인'
+
+# 재무 비교와 원문 근거 검색을 함께 실행
+.venv/bin/python -m finsight agent --rag '삼성전자와 SK하이닉스의 2024년 영업이익률을 비교하고, 두 기업의 사업보고서에서 실적 차이와 관련된 내용을 찾아 설명해 줘.'
+
+# 실제 검색 결과를 저장된 원문·기업·연도·접수번호·위치와 대조
+.venv/bin/python scripts/verify_rag_live.py
+```
+
+OpenDART 키와 OpenAI 키가 필요하며 임베딩/Agent API 사용료가 발생합니다.
+원문은 `data/disclosures/`, DB는 `data/chroma/`, 실행 로그는 `logs/`에 저장하며 모두 Git에서 제외합니다.
+DB 경로는 `--db-path`로 지정할 수 있습니다. 기존 `agent` 명령은 `--rag` 없이 종전 기능을 유지합니다.
+
+동일 원문은 재색인해도 임베딩을 재생성하지 않습니다. 수정된 원문·파서 버전은 새 세대로 색인하고,
+완성된 세대만 검색에 사용합니다. 이전 세대는 로컬에 보존하므로 DB 전체 레코드 수는 활성 조각 수와
+다를 수 있습니다. 원문 내용은 명령으로 실행하지 않으며 모델에는 본문 대신 검색 상태와 조각 ID만 전달합니다.
+
+설명은 검증된 관련 문장의 발췌이며, 계산한 수치는 기존 Python 결과만 사용합니다. 근거 부족·무관한 결과·
+소제목·전망 문장은 실적 원인으로 사용하지 않습니다. 실적 차이의 정량적 인과 기여를 추정하지 않습니다.
+구현·검증 범위와 검색 기준은 [RAG 가이드](docs/rag.md)에 정리했습니다.
 
 ## 실행
 

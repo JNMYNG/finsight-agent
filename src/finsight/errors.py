@@ -38,3 +38,11 @@ class AmbiguousCompanyError(FinSightError):
 
 class AgentModelError(FinSightError):
     """Sanitized model API/protocol failure."""
+
+
+class DisclosureError(FinSightError):
+    """Invalid, unsupported, or unavailable disclosure source/index."""
+
+
+class EmbeddingError(FinSightError):
+    """Sanitized embedding API failure."""

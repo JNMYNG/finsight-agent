@@ -29,6 +29,17 @@ def main(argv: list[str] | None = None) -> int:
     agent.add_argument("--log-file", default="logs/agent.jsonl", help="순서·입력·결과 JSONL 로그")
     agent.add_argument("--max-tool-calls", type=int, default=8)
     agent.add_argument("--max-model-turns", type=int, default=10)
+    agent.add_argument("--rag", action="store_true", help="로컬 사업보고서 검색 Tool 활성화")
+    agent.add_argument("--db-path", default="data/chroma")
+    index = subparsers.add_parser("rag-index", help="대상 2024년 사업보고서 수집·색인")
+    index.add_argument("companies", nargs="*", default=["005930", "000660"])
+    search = subparsers.add_parser("rag-search", help="조건을 제한한 사업보고서 근거 검색")
+    search.add_argument("company")
+    search.add_argument("query")
+    search.add_argument("--top-k", type=int, default=3)
+    for command in (index, search):
+        command.add_argument("--year", type=int, choices=[2024], default=2024)
+        command.add_argument("--db-path", default="data/chroma")
     for command in (financials, comparison):
         command.add_argument("--year", type=int, required=True, help="사업연도 (2015년 이후)")
         command.add_argument("--report", choices=list(ReportType), default=ReportType.ANNUAL)
@@ -45,7 +56,28 @@ def main(argv: list[str] | None = None) -> int:
         settings = Settings.from_env(args.env_file)
         with DartClient(settings.opendart_api_key) as client:
             service = FinancialService(client)
-            if args.command == "agent":
+            if args.command in {"rag-index", "rag-search"}:
+                from finsight.config import AgentSettings
+                from finsight.rag.embeddings import OpenAIEmbedder
+                from finsight.rag.index import DisclosureIndex
+                from finsight.rag.service import DisclosureService
+
+                embedder = OpenAIEmbedder(AgentSettings.from_env(args.env_file))
+                try:
+                    disclosures = DisclosureService(
+                        service, DisclosureIndex(args.db_path, embedder)
+                    )
+                    if args.command == "rag-index":
+                        result = [
+                            disclosures.ingest(company, args.year) for company in args.companies
+                        ]
+                    else:
+                        result = disclosures.search(
+                            args.company, args.year, "11011", args.query, top_k=args.top_k
+                        )
+                finally:
+                    embedder.close()
+            elif args.command == "agent":
                 # Lazy imports keep Day 1 commands independent of agent initialization.
                 from finsight.agent.audit import AuditLog
                 from finsight.agent.graph import FinancialAgent
@@ -61,16 +93,30 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                 )
                 model = OpenAIToolModel(agent_settings)
+                embedder = None
                 try:
+                    options = {}
+                    if args.rag:
+                        from finsight.rag.embeddings import OpenAIEmbedder
+                        from finsight.rag.index import DisclosureIndex
+                        from finsight.rag.service import DisclosureService
+
+                        embedder = OpenAIEmbedder(agent_settings)
+                        options["disclosures"] = DisclosureService(
+                            service, DisclosureIndex(args.db_path, embedder)
+                        )
                     result = FinancialAgent(
                         service,
                         model,
                         audit=audit,
                         max_tool_calls=args.max_tool_calls,
                         max_model_turns=args.max_model_turns,
+                        **options,
                     ).run(args.question)
                 finally:
                     model.close()
+                    if embedder is not None:
+                        embedder.close()
             elif args.command == "lookup":
                 result = asdict(service.directory.find(args.company))
             else:
@@ -82,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
                     result = service.compare(args.left, args.right, args.year, report, basis=basis)
         print(json.dumps(to_json_value(result), ensure_ascii=False, indent=2, allow_nan=False))
         if args.command == "agent" and result.status in {"error", "partial", "limit_reached"}:
+            return 1
+        if args.command == "rag-search" and result.issues:
             return 1
         return 0
     except (FinSightError, ValueError) as exc:

@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -11,6 +11,8 @@ from finsight.errors import (
     CompanyNotFoundError,
     DartAPIError,
     DartTransportError,
+    DisclosureError,
+    EmbeddingError,
     InvalidResponseError,
     NoDataError,
 )
@@ -21,7 +23,11 @@ from finsight.models import (
     ReportType,
     StatementBasis,
 )
+from finsight.rag.models import DisclosureSearch
 from finsight.services import FinancialService, compare_summaries
+
+if TYPE_CHECKING:
+    from finsight.rag.service import DisclosureService
 
 
 class ToolInput(BaseModel):
@@ -52,6 +58,12 @@ class ClarificationInput(ToolInput):
     missing_fields: list[Literal["company", "business_year", "report_type", "basis"]] = Field(
         min_length=1, max_length=4
     )
+
+
+class DisclosureInput(CompanyInput):
+    business_year: int = Field(ge=2015, le=9999)
+    report_type: ReportType
+    query: str = Field(min_length=3, max_length=2000, description="사용자 질문의 검색 주제")
 
 
 @dataclass(frozen=True)
@@ -121,12 +133,25 @@ TOOL_DEFINITIONS = (
     ),
 )
 TOOLS_BY_NAME = {definition.name: definition for definition in TOOL_DEFINITIONS}
+DISCLOSURE_TOOL = ToolDefinition(
+    "search_disclosures",
+    "삼성전자 또는 SK하이닉스 2024년 사업보고서 서술 근거를 검색한다. "
+    "실적 관련 설명 요청 시 각 기업마다 호출한다. 재무 수치 계산은 기존 재무 Tool을 사용한다.",
+    DisclosureInput,
+)
 
 
 @dataclass(frozen=True)
 class ToolOutcome:
     ok: bool
-    data: Corporation | FinancialSummary | FinancialComparison | dict[str, Any] | None = None
+    data: (
+        Corporation
+        | FinancialSummary
+        | FinancialComparison
+        | DisclosureSearch
+        | dict[str, Any]
+        | None
+    ) = None
     error: dict[str, Any] | None = None
 
 
@@ -137,8 +162,11 @@ def tool_error(code: str, message: str, **details: Any) -> ToolOutcome:
 class FinancialTools:
     """One executor per agent run; no cross-question or cross-user financial cache."""
 
-    def __init__(self, service: FinancialService) -> None:
+    def __init__(
+        self, service: FinancialService, disclosures: "DisclosureService | None" = None
+    ) -> None:
         self.service = service
+        self.disclosures = disclosures
         self._summaries: dict[tuple[Any, ...], FinancialSummary] = {}
 
     def _financials(
@@ -160,7 +188,11 @@ class FinancialTools:
         return self._summaries[key]
 
     def execute(self, name: str, arguments: str) -> tuple[dict[str, Any], ToolOutcome]:
-        definition = TOOLS_BY_NAME.get(name)
+        definition = (
+            DISCLOSURE_TOOL
+            if name == DISCLOSURE_TOOL.name and self.disclosures
+            else TOOLS_BY_NAME.get(name)
+        )
         if definition is None:
             return {}, tool_error("UNKNOWN_TOOL", "허용되지 않은 도구입니다.")
         try:
@@ -176,7 +208,11 @@ class FinancialTools:
         try:
             if isinstance(parsed, ClarificationInput):
                 return args, ToolOutcome(True, {"missing_fields": parsed.missing_fields})
-            if isinstance(parsed, ComparisonInput):
+            if isinstance(parsed, DisclosureInput):
+                data = self.disclosures.search(
+                    parsed.company, parsed.business_year, parsed.report_type, parsed.query
+                )
+            elif isinstance(parsed, ComparisonInput):
                 data = compare_summaries(
                     self._financials(
                         parsed.left, parsed.business_year, parsed.report_type, parsed.basis
@@ -211,6 +247,10 @@ class FinancialTools:
             outcome = tool_error(
                 "INVALID_DART_RESPONSE", "OpenDART 응답 형식이나 메타데이터가 잘못됐습니다."
             )
+        except DisclosureError:
+            outcome = tool_error("DISCLOSURE_ERROR", "원문 범위·출처 또는 색인 상태를 확인하세요.")
+        except EmbeddingError:
+            outcome = tool_error("EMBEDDING_ERROR", "검색 임베딩 생성에 실패했습니다.")
         return args, outcome
 
 

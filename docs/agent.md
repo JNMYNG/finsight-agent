@@ -1,5 +1,8 @@
 # Day 2 Agent 구조와 사용법
 
+Day 2 당시의 기본 Agent 설명이다. Day 2-2의 선택적 `--rag`와 사업보고서 근거 검색은
+[RAG 가이드](rag.md)에 추가했다. 기존 기본 모드는 그대로 유지된다.
+
 ## 실행 흐름
 
 Day 1 `CorporationDirectory`와 `FinancialService`를 재사용한다. 새로운 재무 계산 로직이나

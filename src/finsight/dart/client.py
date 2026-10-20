@@ -143,3 +143,17 @@ class DartClient:
         if not rows:
             raise NoDataError("013", "주요계정 목록이 비어 있습니다.")
         return rows
+
+    def download_disclosure(self, receipt_no: str) -> bytes:
+        """Official document.xml returns a ZIP of disclosure XML, not a PDF."""
+        if not re.fullmatch(r"[0-9]{14}", receipt_no):
+            raise ValueError("접수번호는 14자리 숫자여야 합니다.")
+        content = self._get("document.xml", rcept_no=receipt_no).content
+        if is_zipfile(BytesIO(content)):
+            return content
+        try:
+            root = ElementTree.fromstring(content)
+        except (ParseError, DefusedXmlException):
+            raise InvalidResponseError("공시 원문 응답이 ZIP 또는 안전한 XML이 아닙니다.") from None
+        self._check_status({"status": root.findtext("status"), "message": root.findtext("message")})
+        raise InvalidResponseError("공시 원문 성공 응답에 ZIP이 없습니다.")
